@@ -298,3 +298,98 @@ Expose `total_shares()` as a read-only view. Off-chain monitoring scripts should
 ---
 
 *This report was produced as part of an internal security audit. It covers the contract source at the time of review. Any subsequent changes to the codebase should be re-audited before production deployment.*
+
+---
+
+## Security Review — Issue #382: Soroban Auth Context Validation for Delegated Calls
+
+**Date:** 2026-08-29
+**Reviewer:** Internal Security Review
+**Status:** ✅ COMPLETE — all acceptance criteria verified
+
+### Background
+
+Soroban's authorization model is invocation-tree based: every `Address::require_auth()` call asserts that the address has pre-signed an authorization for the exact `(contract_id, fn_name, args)` tuple currently executing.  This model inherently prevents caller spoofing — an address cannot be made to authorise an action it did not sign for.
+
+However, two classes of delegated-call risk exist that require deliberate attention:
+
+1. **Caller identity spoofing** — A transaction that calls `vault.deposit(victim, amount)` where the auth stack contains only the attacker's signature (not the victim's) must be rejected.
+2. **Argument substitution replay** — A valid auth token signed for `deposit(user, 100)` must not be reusable to execute `deposit(user, 1_000_000)`.  In Soroban this is enforced by the runtime when args are part of the signed invocation hash.
+
+### Audit Findings
+
+#### Finding #382-1 — Auth coverage (Informational / Resolved at creation)
+
+**Status:** No action required — the contract was already compliant.
+
+All mutating functions were reviewed:
+
+| Function | Auth call | Bound to caller identity | Notes |
+|---|---|---|---|
+| `deposit(caller, amount)` | `caller.require_auth()` | ✅ | Soroban binds args to invocation hash |
+| `withdraw(caller, shares)` | `caller.require_auth()` | ✅ | Soroban binds args to invocation hash |
+| `harvest(caller, amount)` | `caller.require_auth()` | ✅ | Permissionless keeper; caller binds auth |
+| `harvest_token(caller, ...)` | `caller.require_auth()` | ✅ | Alt-token path; same protection |
+| `distribute_yield(caller, amount)` | `caller.require_auth()` | ✅ | Permissionless |
+| `collect_pending_yield(caller)` | `caller.require_auth()` | ✅ | Per-user yield claim |
+| `pause(admin)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `unpause(admin)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `set_fees(admin, ...)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `set_treasury(admin, ...)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `withdraw_fees(admin)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `set_tvl_cap(admin, ...)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `set_harvest_cooldown(admin, ...)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `reset_harvest_cooldown(admin)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `upgrade(...)` | `admin.require_auth()` | ✅ | Identity derived from storage |
+| `claim_queued_withdrawal(caller, ...)` | `caller.require_auth()` | ✅ | Entry ownership enforced |
+| `set_withdrawal_queue_threshold(...)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `set_withdrawal_unbonding_secs(...)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `set_withdrawal_fee(admin, ...)` | `admin.require_auth()` | ✅ | Identity check + stored admin match |
+| `register_yield_token(...)` | `admin.require_auth()` | ✅ | Admin derived from storage |
+
+#### Finding #382-2 — Double identity check on admin functions (Best Practice / Resolved)
+
+**Status:** Already implemented — no change needed.
+
+Admin functions use a two-layer identity check:
+```rust
+let stored_admin = get_admin(&env).ok_or(VaultError::NotInitialized)?;
+if stored_admin != admin {
+    return Err(VaultError::UpgradeUnauthorized);
+}
+admin.require_auth();
+```
+
+This is the correct defence-in-depth pattern:
+- The equality check rejects mismatched address arguments before touching the auth stack.
+- `require_auth()` then asserts the matched address actually signed this invocation.
+- Neither check alone is sufficient; together they prevent both argument-mismatch attacks and unsigned-admin-address attacks.
+
+#### Finding #382-3 — Argument-substitution protection (Informational)
+
+**Status:** Protected by Soroban runtime — no code change needed.
+
+Soroban's invocation-tree auth model includes the full argument list in the signed hash when `require_auth()` is called inside a function.  An auth token signed for `deposit(user, 100)` cannot be replayed for `deposit(user, 1_000_000)` because the args differ.  This is verified in the new test suite (`auth_validation_test.rs`, tests 11–12).
+
+### Test Coverage Added
+
+New test file: `aura-vault/src/auth_validation_test.rs`
+
+| Test | What it verifies |
+|---|---|
+| `test_deposit_spoofed_caller_rejected` | Attacker's auth cannot substitute for victim's in `deposit` |
+| `test_deposit_valid_delegated_auth_accepted` | Explicitly-authorised deposit succeeds |
+| `test_withdraw_spoofed_caller_rejected` | Attacker's auth cannot substitute for victim's in `withdraw` |
+| `test_withdraw_valid_delegated_auth_accepted` | Explicitly-authorised withdraw succeeds |
+| `test_harvest_spoofed_caller_rejected` | Attacker's auth cannot substitute for keeper's in `harvest` |
+| `test_harvest_valid_delegated_auth_accepted` | Explicitly-authorised harvest succeeds |
+| `test_pause_non_admin_rejected` | Non-admin cannot pause vault |
+| `test_pause_valid_admin_auth_accepted` | Admin with valid auth can pause |
+| `test_set_fees_non_admin_rejected` | Non-admin cannot set fees |
+| `test_set_tvl_cap_non_admin_rejected` | Non-admin cannot set TVL cap |
+| `test_deposit_auth_bound_to_amount` | Auth signed for amount=100 cannot execute deposit with amount=1_000_000 |
+| `test_withdraw_auth_bound_to_shares` | Auth signed for 1 share cannot execute withdraw of all shares |
+
+### Conclusion
+
+The contract's auth model is sound and complete.  All mutating functions call `require_auth()` on the acting address before any state mutation or token transfer.  Admin functions add a double-check (stored admin equality + `require_auth()`).  Soroban's invocation-tree arg-binding prevents argument-substitution replay attacks without any additional code.  The new test suite in `auth_validation_test.rs` provides regression coverage for all of the above.
