@@ -1,0 +1,72 @@
+name: Storage TTL Monitor (Issue #380)
+
+on:
+  schedule:
+    # Run every 6 hours — keys expire in 30-day windows; 6h polling gives
+    # plenty of lead time when the 7-day alert threshold is crossed.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      auto_bump:
+        description: "Automatically call bump_storage() if TTL is below threshold"
+        type: boolean
+        default: false
+      threshold_days:
+        description: "Alert threshold in days (default: 7)"
+        type: number
+        default: 7
+
+jobs:
+  monitor-ttl:
+    name: Check Vault Storage TTL
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install stellar CLI
+        run: |
+          cargo install stellar-cli --locked
+          stellar --version
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Run TTL monitor
+        id: ttl_check
+        env:
+          CONTRACT_ID: ${{ secrets.VAULT_CONTRACT_ID_TESTNET }}
+          STELLAR_NETWORK: testnet
+          STELLAR_KEYPAIR: ${{ secrets.VAULT_KEEPER_SECRET }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALERT_THRESHOLD_DAYS: ${{ github.event.inputs.threshold_days || '7' }}
+          AUTO_BUMP: ${{ github.event.inputs.auto_bump || 'false' }}
+        run: ./scripts/monitor-ttl.sh
+        # exit code 1 = alert but not a CI failure — we want the alert to show
+        # in the workflow summary but not block other workflows.
+        continue-on-error: true
+
+      - name: Annotate alert in workflow summary
+        if: steps.ttl_check.outcome == 'failure'
+        run: |
+          echo "## ⚠️ Storage TTL Alert" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The AuraVault contract instance storage TTL is below the **${{ github.event.inputs.threshold_days || 7 }}-day threshold**." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Action required:** Call \`bump_storage()\` on the contract or set \`AUTO_BUMP=true\`." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Re-run this workflow with *auto_bump=true* to auto-bump, or run manually:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo 'stellar contract invoke \\' >> $GITHUB_STEP_SUMMARY
+          echo '  --id <CONTRACT_ID> \\' >> $GITHUB_STEP_SUMMARY
+          echo '  --source <KEEPER_KEY> \\' >> $GITHUB_STEP_SUMMARY
+          echo '  --network testnet \\' >> $GITHUB_STEP_SUMMARY
+          echo '  -- bump_storage' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Fail job if TTL alert
+        if: steps.ttl_check.outcome == 'failure'
+        run: exit 1
