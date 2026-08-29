@@ -23,7 +23,7 @@ proptest! {
         let token = Address::generate(&env);
         let user = Address::generate(&env);
 
-        let _ = AuraVault::initialize(env.clone(), admin, token.clone());
+        let _ = AuraVault::initialize(env.clone(), admin, token.clone(), soroban_sdk::Vec::new(&env), 0);
         
         match AuraVault::deposit(env, user, amount) {
             Ok(shares) => prop_assert_eq!(shares, amount),
@@ -44,7 +44,7 @@ proptest! {
         let token = Address::generate(&env);
         let user = Address::generate(&env);
 
-        let _ = AuraVault::initialize(env.clone(), admin, token, );
+        let _ = AuraVault::initialize(env.clone(), admin, token, soroban_sdk::Vec::new(&env), 0);
         
         if let Ok(shares) = AuraVault::deposit(env.clone(), user.clone(), amount) {
             if let Ok(redeemed) = AuraVault::withdraw(env, user, shares) {
@@ -62,7 +62,7 @@ proptest! {
         let user1 = Address::generate(&env);
         let user2 = Address::generate(&env);
 
-        let _ = AuraVault::initialize(env.clone(), admin, token);
+        let _ = AuraVault::initialize(env.clone(), admin, token, soroban_sdk::Vec::new(&env), 0);
         
         let shares1 = AuraVault::deposit(env.clone(), user1.clone(), amount1).unwrap_or(0);
         let shares2 = AuraVault::deposit(env.clone(), user2.clone(), amount2).unwrap_or(0);
@@ -82,7 +82,7 @@ proptest! {
         let token = Address::generate(&env);
         let user = Address::generate(&env);
 
-        let _ = AuraVault::initialize(env.clone(), admin, token);
+        let _ = AuraVault::initialize(env.clone(), admin, token, soroban_sdk::Vec::new(&env), 0);
         let shares = AuraVault::deposit(env.clone(), user.clone(), deposit_amount).unwrap_or(0);
         
         if withdraw_amount > shares {
@@ -102,7 +102,7 @@ proptest! {
         let token = Address::generate(&env);
         let user = Address::generate(&env);
 
-        let _ = AuraVault::initialize(env.clone(), admin, token);
+        let _ = AuraVault::initialize(env.clone(), admin, token, soroban_sdk::Vec::new(&env), 0);
         
         match AuraVault::deposit(env, user, 0) {
             Err(VaultError::ZeroAmount) => {},
@@ -119,7 +119,7 @@ proptest! {
         let user = Address::generate(&env);
         let keeper = Address::generate(&env);
 
-        let _ = AuraVault::initialize(env.clone(), admin, token);
+        let _ = AuraVault::initialize(env.clone(), admin, token, soroban_sdk::Vec::new(&env), 0);
         let _ = AuraVault::deposit(env.clone(), user, deposit);
         
         let assets_before = AuraVault::total_assets(env.clone());
@@ -137,7 +137,7 @@ proptest! {
         let token = Address::generate(&env);
         let user = Address::generate(&env);
 
-        let _ = AuraVault::initialize(env.clone(), admin, token);
+        let _ = AuraVault::initialize(env.clone(), admin, token, soroban_sdk::Vec::new(&env), 0);
         
         // Should not panic on overflow
         let _ = AuraVault::deposit(env, user, amount);
@@ -155,7 +155,7 @@ mod invariants {
         let admin = Address::generate(&env);
         let token = Address::generate(&env);
         
-        let _ = AuraVault::initialize(env.clone(), admin, token);
+        let _ = AuraVault::initialize(env.clone(), admin, token, soroban_sdk::Vec::new(&env), 0);
         
         let total_assets = AuraVault::total_assets(env);
         assert!(total_assets >= 0, "Total assets cannot be negative");
@@ -169,7 +169,7 @@ mod invariants {
         let admin = Address::generate(&env);
         let token = Address::generate(&env);
         
-        let _ = AuraVault::initialize(env.clone(), admin, token);
+        let _ = AuraVault::initialize(env.clone(), admin, token, soroban_sdk::Vec::new(&env), 0);
         
         let balance = AuraVault::balance_of(env, address);
         assert!(balance >= 0, "Share balance cannot be negative");
@@ -182,7 +182,7 @@ mod invariants {
         let admin = Address::generate(&env);
         let token = Address::generate(&env);
         
-        let _ = AuraVault::initialize(env.clone(), admin, token);
+        let _ = AuraVault::initialize(env.clone(), admin, token, soroban_sdk::Vec::new(&env), 0);
         
         let version = AuraVault::version(env);
         assert!(version >= 1, "Version must be at least 1");

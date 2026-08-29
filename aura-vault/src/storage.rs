@@ -49,6 +49,13 @@ pub enum DataKey {
     WithdrawalNextId,
     /// Individual withdrawal queue entry keyed by queue ID.
     WithdrawalEntry(u64),
+    /// Share price precision multiplier (default: 10_000_000 = 10^7 for Stellar's
+    /// 7-decimal standard). Stored as u32; used in share price view calculations.
+    /// Does NOT affect deposit/withdraw share arithmetic — that always uses the
+    /// raw token unit ratio to prevent rounding attacks.  The precision value is
+    /// used exclusively by `share_price()` to return a human-readable fixed-point
+    /// representation of the exchange rate.
+    PricePrecision,
 }
 
 pub const DAY_IN_LEDGERS: u32 = 17_280;
@@ -404,4 +411,182 @@ pub struct WithdrawalEntry {
     pub claimable_after: u64,
     /// Whether this entry has already been claimed.
     pub claimed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Share price precision helpers (Issue #383)
+//
+// `price_precision` is the multiplier used by `share_price()` to express the
+// exchange rate as a fixed-point integer.
+//
+// Default: 10_000_000 (10^7) — matches Stellar's 7-decimal stroop standard so
+// that `share_price()` returns the exchange rate in the same unit as the
+// underlying token's smallest denominator.
+//
+// Example: if total_assets = 1_050_000_000 and total_shares = 1_000_000_000,
+//   share_price = 1_050_000_000 * 10_000_000 / 1_000_000_000 = 10_500_000
+//   i.e. 1.05 expressed with 7 decimal places.
+//
+// Deployers targeting non-7-decimal tokens can pass a different value to
+// `initialize` (e.g. 1_000_000 for a 6-decimal USDC-equivalent).
+// ---------------------------------------------------------------------------
+
+/// Default price precision: 10^7, matching Stellar's stroop denomination.
+pub const DEFAULT_PRICE_PRECISION: u32 = 10_000_000;
+
+/// Return the configured share price precision multiplier.
+/// Defaults to `DEFAULT_PRICE_PRECISION` (10^7) if never set.
+pub fn get_price_precision(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::PricePrecision)
+        .unwrap_or(DEFAULT_PRICE_PRECISION)
+}
+
+/// Persist the share price precision multiplier.
+pub fn set_price_precision(env: &Env, precision: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PricePrecision, &precision);
+}
+
+// ---------------------------------------------------------------------------
+// VaultSnapshot — complete state export for off-chain indexing (Issue #381)
+//
+// All fields are read from instance storage in O(1) gas (instance entry is
+// a single ledger blob, loaded once at invocation start).
+//
+// ## Field semantics
+//
+// | Field | DataKey | Description |
+// |---|---|---|
+// | total_assets | TotalDeposited | Current underlying token balance tracked by vault |
+// | total_shares | TotalShares | Total outstanding vault shares |
+// | admin | Admin | Privileged admin address |
+// | underlying_token | UnderlyingToken | SEP-41 token contract address |
+// | is_paused | Paused | Whether vault is currently halted |
+// | perf_fee_bps | PerfFeeBps | Performance fee in bps (default 1000 = 10%) |
+// | mgmt_fee_bps | MgmtFeeBps | Management fee in bps (currently unused) |
+// | total_fee_collected | TotalFeeCollected | Accumulated fees not yet withdrawn |
+// | tvl_cap | TvlCap | Maximum total assets allowed (0 = unlimited) |
+// | last_harvest | LastHarvestTime | Unix timestamp of last successful harvest |
+// | harvest_cooldown_secs | HarvestCooldownSecs | Min seconds between harvests (0 = none) |
+// | price_precision | PricePrecision | share_price() multiplier (default 10^7) |
+// | cumulative_yps | CumulativeYps | Global yield-per-share accumulator |
+// | distribution_epoch | DistributionEpoch | Monotonic distribution counter |
+// | withdrawal_queue_threshold | WithdrawalQueueThreshold | Queue trigger threshold |
+// | withdrawal_unbonding_secs | WithdrawalUnbondingSecs | Queue unbonding period |
+// | withdrawal_fee_bps | WithdrawalFeeBps | Fee charged on queued withdrawal claims |
+// | version | Version | Contract version (bumped on upgrade) |
+// | layout_version | LayoutVersion | Storage schema version |
+// ---------------------------------------------------------------------------
+
+/// Complete snapshot of all vault instance-storage state.
+///
+/// Returned by [`AuraVault::export_state`] for off-chain indexer bootstrap.
+/// All fields are sourced from instance storage in a single O(1) call.
+///
+/// ## Usage
+///
+/// ```no_run
+/// // Rust integration (Soroban test env):
+/// let snapshot = vault_client.export_state();
+/// assert_eq!(snapshot.version, 1);
+/// println!("Total TVL: {}", snapshot.total_assets);
+/// ```
+///
+/// ## Gas cost
+///
+/// `export_state()` reads exclusively from the contract's instance storage
+/// entry, which is loaded into memory at invocation start.  Subsequent field
+/// accesses are in-memory lookups — no additional storage ops.  Gas cost is
+/// ~1.2× a single `total_assets()` call due to return-value serialisation.
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug)]
+pub struct VaultSnapshot {
+    // -----------------------------------------------------------------------
+    // Core accounting
+    // -----------------------------------------------------------------------
+    /// Total underlying tokens tracked by the vault (= `total_deposited`).
+    /// Equals deposits + harvested yield - withdrawals - fee accruals.
+    pub total_assets: i128,
+
+    /// Total outstanding vault shares.
+    pub total_shares: i128,
+
+    // -----------------------------------------------------------------------
+    // Admin / configuration
+    // -----------------------------------------------------------------------
+    /// Privileged admin address (pause, fees, upgrade, TVL cap, etc.).
+    pub admin: Address,
+
+    /// SEP-41 underlying token contract address.
+    pub underlying_token: Address,
+
+    /// `true` if the vault is currently paused (deposit/withdraw/harvest blocked).
+    pub is_paused: bool,
+
+    // -----------------------------------------------------------------------
+    // Fee configuration
+    // -----------------------------------------------------------------------
+    /// Performance fee in basis points (default 1000 = 10%).
+    pub perf_fee_bps: u32,
+
+    /// Management fee in basis points (reserved, currently 0).
+    pub mgmt_fee_bps: u32,
+
+    /// Accumulated performance fees not yet transferred to treasury.
+    pub total_fee_collected: i128,
+
+    // -----------------------------------------------------------------------
+    // TVL cap
+    // -----------------------------------------------------------------------
+    /// Maximum total assets allowed (0 = unlimited).
+    pub tvl_cap: i128,
+
+    // -----------------------------------------------------------------------
+    // Harvest timing
+    // -----------------------------------------------------------------------
+    /// Unix timestamp (seconds) of the last successful `harvest()` call.
+    /// `0` means the vault has never been harvested.
+    pub last_harvest: u64,
+
+    /// Minimum seconds required between harvest calls. `0` = no cooldown.
+    pub harvest_cooldown_secs: u64,
+
+    // -----------------------------------------------------------------------
+    // Share price precision
+    // -----------------------------------------------------------------------
+    /// Multiplier used by `share_price()` (default 10_000_000 = 10^7).
+    pub price_precision: u32,
+
+    // -----------------------------------------------------------------------
+    // Yield distribution accumulator
+    // -----------------------------------------------------------------------
+    /// Global cumulative yield-per-share (YPS), scaled by YIELD_PRECISION.
+    pub cumulative_yps: i128,
+
+    /// Monotonic distribution epoch counter (bumped on each distribution).
+    pub distribution_epoch: u64,
+
+    // -----------------------------------------------------------------------
+    // Withdrawal queue configuration
+    // -----------------------------------------------------------------------
+    /// Redemption amount at or above which withdrawals are queued. 0 = disabled.
+    pub withdrawal_queue_threshold: i128,
+
+    /// Seconds a queued withdrawal must wait before it can be claimed.
+    pub withdrawal_unbonding_secs: u64,
+
+    /// Fee charged on queued-withdrawal claims in basis points (0–500).
+    pub withdrawal_fee_bps: u32,
+
+    // -----------------------------------------------------------------------
+    // Contract version
+    // -----------------------------------------------------------------------
+    /// Contract version counter (monotonically incremented on each upgrade).
+    pub version: u32,
+
+    /// Storage schema version (must match CURRENT_LAYOUT_VERSION on upgrade).
+    pub layout_version: u32,
 }

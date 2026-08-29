@@ -41,11 +41,13 @@ pub trait AuraVaultTrait {
     ///   tokens are deposited into and withdrawn from the vault.
     /// - `signers` — Ordered list of addresses authorised to create and vote
     ///   on governance proposals. Must be non-empty.
+    /// - `price_precision` — Fixed-point multiplier for [`share_price`].
+    ///   Pass `0` to use the default `10_000_000` (10^7, Stellar standard).
     ///
     /// # Errors
     ///
     /// - [`VaultError::AlreadyInitialized`] — vault has already been initialised.
-    fn initialize(env: Env, admin: Address, underlying_token: Address, signers: Vec<Address>) -> Result<(), VaultError>;
+    fn initialize(env: Env, admin: Address, underlying_token: Address, signers: Vec<Address>, price_precision: u32) -> Result<(), VaultError>;
 
     /// Deposit underlying tokens and receive proportional vault shares.
     ///
@@ -308,6 +310,41 @@ pub trait AuraVaultTrait {
 
     /// Return the timestamp of the last successful harvest.
     fn last_harvest_time(env: Env) -> u64;
+
+    /// Refresh the TTL on all critical instance-storage DataKeys.
+    ///
+    /// Permissionless keeper function.  Emits a `StorageBumped` event.
+    /// Returns the number of storage groups bumped (always 1 = instance storage).
+    ///
+    /// Should be called at least once every 7 days to prevent archival.
+    fn bump_storage(env: Env) -> u32;
+
+    /// Return a complete snapshot of all vault instance-storage state.
+    ///
+    /// Used by the backend on startup to sync state without replaying events.
+    /// All fields are read from instance storage in a single O(1) call.
+    ///
+    /// # Errors
+    ///
+    /// - [`VaultError::NotInitialized`] — vault has not been initialised.
+    fn export_state(env: Env) -> Result<crate::storage::VaultSnapshot, VaultError>;
+
+    /// Return the current exchange rate of one vault share, expressed as a
+    /// fixed-point integer scaled by `price_precision` (default 10^7).
+    ///
+    /// Formula: `share_price = total_assets * price_precision / total_shares`
+    ///
+    /// Returns `price_precision` (1.0 in fixed-point) when the vault is empty.
+    ///
+    /// Read-only; no authorization required.
+    fn share_price(env: Env) -> i128;
+
+    /// Return the configured share price precision multiplier.
+    ///
+    /// Default: `10_000_000` (10^7) — Stellar 7-decimal standard.
+    ///
+    /// Read-only; no authorization required.
+    fn get_price_precision(env: Env) -> u32;
 
     /// Returns the total underlying tokens currently tracked by the vault
     /// (`total_deposited`), in the underlying token's smallest unit.

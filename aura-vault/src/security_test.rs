@@ -31,7 +31,7 @@ mod security_tests {
         let vault_addr = env.register_contract(None, AuraVault);
         let vault = AuraVaultClient::new(&env, &vault_addr);
         let signers: Vec<Address> = Vec::new(&env);
-        vault.initialize(&admin, &token_addr, &signers);
+        vault.initialize(&admin, &token_addr, &signers, &0_u32);
         vault.set_fees(&admin, &0_u32, &0_u32);
         (env, vault, admin, token_addr)
     }
@@ -272,7 +272,7 @@ mod security_tests {
     fn test_access_control_double_initialize_rejected() {
         let (env, vault, admin, token) = setup();
         let signers: Vec<Address> = Vec::new(&env);
-        let result = vault.try_initialize(&admin, &token, &signers);
+        let result = vault.try_initialize(&admin, &token, &signers, &0_u32);
         assert_eq!(result, Err(Ok(VaultError::AlreadyInitialized)));
     }
 
